@@ -1,0 +1,99 @@
+trigger:
+  branches:
+    include:
+    - main
+  paths:
+    exclude:
+    - '**/*.md'
+
+pr:
+  branches:
+    include:
+    - main
+  drafts: false
+  paths:
+    exclude:
+      - '**/*.md'
+
+variables:
+  repo_name: $[split(variables['Build.Repository.Name'], '/')[1]] # Get the repository name without the organization prefix
+  remote_dir: $[format('/tmp/{0}/{1}', variables['Build.BuildId'], variables['repo_name'])]
+  # remote_host: x.x.x.x # Set as pipeline variable, shown here for clarity
+  # System.Debug: true|false # Set as pipeline variable to enable debug tasks, shown here for clarity
+
+jobs:
+- job: Build
+  displayName: Build NCCL Plugin
+  pool:
+    name: mrc-ci-hosted-pool
+
+  steps:
+  # Download SSH key + install packages
+  - task: DownloadSecureFile@1
+    name: SshKeyFile
+    displayName: Download key file
+    inputs:
+      secureFile: mrc.pem
+
+  - task: Bash@3
+    name: SetSshKeyPermissions
+    displayName: Set Permissions on SSH Key
+    inputs:
+      targetType: 'inline'
+      script: |
+        chmod 400 ${SSHKEYFILE_SECUREFILEPATH}
+
+  - task: Bash@3
+    name: InstallPackages
+    displayName: Install Packages
+    inputs:
+      targetType: 'inline'
+      script: |
+        sudo apt update -y
+        sudo apt install pssh -y
+
+  # Run remote task
+  - task: Bash@3
+    name: Ping
+    displayName: Ping Remote Host
+    condition: eq(variables['System.Debug'], 'true')
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "##[command]ip -br a show"
+        ip -br a show
+
+        echo "##[command]ping:"
+        ping -c 5 -W 5 $(remote_host)
+
+  - task: Bash@3
+    name: CopyRepo
+    displayName: Copy Repository to Remote Host
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "##[debug]Repository local path: $(Build.Repository.LocalPath)"
+        echo "Copying repository to remote host"
+        rsync -avz --mkpath -e "ssh -i ${SSHKEYFILE_SECUREFILEPATH} -o StrictHostKeyChecking=no" $(Build.Repository.LocalPath)/* azhpcuser@${REMOTE_HOST}:${REMOTE_DIR}/
+
+  # Must use macro syntax
+  - template: templates/run-remote-task.yml
+    parameters:
+      name: BuildPlugin
+      displayName: Build NCCL Plugin on Remote Host
+      runRemoteArgs: '--host $(remote_host) --user azhpcuser'
+      remoteScript: |
+        echo "##[debug]Repository directory on remote host: $(remote_dir)"
+
+        echo "##[Section]Building NCCL Plugin"
+        pushd $(remote_dir)
+        make
+        popd
+        echo "Finished building NCCL Plugin"
+
+        echo "##[Section]Running sanity check"
+        echo "##[debug]TODO: Implement sanity check for NCCL Plugin"
+        echo "Finished running sanity check"
+
+        echo "##[section]Cleaning up"
+        rm -r $(remote_dir)
