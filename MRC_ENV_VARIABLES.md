@@ -10,6 +10,12 @@ These environment variables control MRC (Multi-Path Reliable Connection) behavio
 | `NCCL_MRC_RETRY_CNT_LINEAR` | 7 | 0–7 | Linear (fixed-interval) retry limit for lost packets. Currently unsupported by vendor specific mrc.h |
 | `NCCL_MRC_RETRY_CNT_EXP` | 25 | 0–25 | Exponential-backoff retry limit. A value of 25 means infinite retries. Currently unsupported by vendor specific mrc.h |
 
+## Memory Registration Parameters
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `NCCL_IB_PCI_RELAXED_ORDERING` | 2 | 0–2 | Controls PCI relaxed ordering for memory registrations. 0 = disable, 1 = enable, 2 = enable when supported. Registrations requesting strict ordering remain strict. |
+
 ## Congestion Control Parameters
 
 | Variable | Default | Range | Description |

@@ -561,6 +561,18 @@ NCCL_PARAM(IbGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
 NCCL_PARAM(IbQpsPerConn, "IB_QPS_PER_CONNECTION", 1);
 NCCL_PARAM(IbSplitDataOnQps, "IB_SPLIT_DATA_ON_QPS", 0);
 NCCL_PARAM(IbWarnRailLocal, "IB_WARN_RAIL_LOCAL", 0);
+NCCL_PARAM(IbPciRelaxedOrdering, "IB_PCI_RELAXED_ORDERING", 2);
+
+static int ncclIbRelaxedOrderingEnabled = 0;
+
+static int ncclIbRelaxedOrderingCapable(void) {
+  int roMode = ncclParamIbPciRelaxedOrdering();
+  ncclResult_t result = ncclInternalError;
+  if (roMode == 1 || roMode == 2) {
+    result = wrap_ibv_reg_mr_iova2(NULL, NULL, NULL, 0, 0, 0);
+  }
+  return result == ncclInternalError ? 0 : 1;
+}
 
 struct mrc_cc_hint {
   uint8_t version;
@@ -1095,6 +1107,9 @@ static ncclResult_t ncclMRCInitDevices(ncclDebugLogger_t logFunction, ncclProfil
 
   ncclResult_t ret = nccl_p2p_ib_init(&ncclNIbDevs, &ncclNMergedIbDevs, ncclIbDevs, ncclIbIfName, &ncclIbIfAddr, &ncclIbAsyncThread, logFunction);
   if (ret != ncclSuccess) return ret;
+
+  ncclIbRelaxedOrderingEnabled = ncclIbRelaxedOrderingCapable();
+  INFO(NCCL_INIT|NCCL_NET, "NET/IB : PCI relaxed ordering %s", ncclIbRelaxedOrderingEnabled ? "enabled" : "disabled");
   return ncclSuccess;
 }
 
@@ -1721,6 +1736,8 @@ ncclResult_t ncclMRCRegMrDmaBufInternalPerDev(ncclIbNetCommDevBase* base, void* 
       // Deregister / register
       struct ibv_mr* mr;
       unsigned int flags = IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ|IBV_ACCESS_REMOTE_ATOMIC;
+      bool relaxedOrdering = ncclIbRelaxedOrderingEnabled && (mrFlags & NCCL_NET_MR_FLAG_FORCE_SO) == 0;
+      if (relaxedOrdering) flags |= IBV_ACCESS_RELAXED_ORDERING;
       if (fd != -1) {
         /* DMA-BUF support */
         if (!ncclIbDevs[base->ibDevN].capsProvider.mlx5.dataDirect) {
@@ -1729,7 +1746,11 @@ ncclResult_t ncclMRCRegMrDmaBufInternalPerDev(ncclIbNetCommDevBase* base, void* 
           NCCLCHECKGOTO(wrap_mlx5dv_reg_dmabuf_mr(&mr, base->pd, offset, pages*pageSize, addr, fd, flags, 1), res, returning);
         }
       } else {
-        NCCLCHECKGOTO(wrap_ibv_reg_mr(&mr, base->pd, (void*)addr, pages*pageSize, flags), res, returning);
+        if (relaxedOrdering) {
+          NCCLCHECKGOTO(wrap_ibv_reg_mr_iova2(&mr, base->pd, (void*)addr, pages*pageSize, addr, flags), res, returning);
+        } else {
+          NCCLCHECKGOTO(wrap_ibv_reg_mr(&mr, base->pd, (void*)addr, pages*pageSize, flags), res, returning);
+        }
       }
       TRACE(NCCL_INIT|NCCL_NET,"regAddr=0x%lx size=%lld rkey=0x%x lkey=0x%x fd=%d", (unsigned long)addr, (long long)pages*pageSize, mr->rkey, mr->lkey, fd);
       if (slot != cache->population) memmove(cache->slots+slot+1, cache->slots+slot, (cache->population-slot)*sizeof(struct ncclIbMr));
