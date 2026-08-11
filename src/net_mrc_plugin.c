@@ -59,6 +59,7 @@ NCCL_PARAM(MrcRetryCntExp, "MRC_RETRY_CNT_EXP", 25);
 NCCL_PARAM(MrcCcInitRate, "MRC_CC_INIT_RATE", 0);
 NCCL_PARAM(MrcCcMinRate, "MRC_CC_MIN_RATE", 0);
 NCCL_PARAM(MrcCcMaxRate, "MRC_CC_MAX_RATE", 0);
+NCCL_PARAM(MrcQpHintEnable, "MRC_QP_HINT_ENABLE", 1);
 
 // With ncclNet_v11_t the NCCL core initializes the network plugin per-communicator
 // rather than once for all communicators. However, the internal plugin implementation
@@ -1116,6 +1117,11 @@ static ncclResult_t ncclMRCInitDevices(ncclDebugLogger_t logFunction, ncclProfil
 // Helper to create and store a QP hint for a given QP slot in commBase
 // Must be called after comm->base.qps[q].devIndex is assigned
 static ncclResult_t ncclMRCCreateQpHint(struct ncclIbNetCommBase* commBase, int qpIdx) {
+  if (!ncclParamMrcQpHintEnable()) {
+    commBase->qpHints[qpIdx] = NULL;
+    return ncclSuccess;
+  }
+
   int devIndex = commBase->qps[qpIdx].devIndex;
   struct ncclIbDev* ibDev = ncclIbDevs + commBase->vProps.devs[devIndex];
   struct mrc_context* mrcCtx = ibDev->mrcContext;
