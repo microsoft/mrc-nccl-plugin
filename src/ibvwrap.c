@@ -161,6 +161,11 @@ struct ibv_mr * wrap_direct_ibv_reg_mr(struct ibv_pd *pd, void *addr, size_t len
   return ibv_reg_mr(pd, addr, length, access);
 }
 
+ncclResult_t wrap_ibv_reg_mr_iova2(struct ibv_mr **ret, struct ibv_pd *pd, void *addr, size_t length, uint64_t iova, int access) {
+  if (ret == NULL) return ncclSuccess;
+  IBV_PTR_CHECK_ERRNO(ibv_reg_mr_iova2(pd, addr, length, iova, access), *ret, NULL, "ibv_reg_mr_iova2");
+}
+
 /* DMA-BUF support */
 ncclResult_t wrap_ibv_reg_dmabuf_mr(struct ibv_mr **ret, struct ibv_pd *pd, uint64_t offset, size_t length, uint64_t iova, int fd, int access) {
 #if HAVE_DECL_IBV_REG_DMABUF_MR

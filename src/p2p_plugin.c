@@ -227,9 +227,6 @@ ncclResult_t ncclIbGetPhysProperties(int dev, ncclNetProperties_t* props) {
   }
   props->regIsGlobal = 1;
   props->forceFlush = 0;
-  if (ibDev->capsProvider.mlx5.dataDirect) {
-    props->forceFlush = 1;
-  }
   if ((p2p_plugin == NCCL_P2P_IB) &&
       nccl_p2p_dmabuf_support(dev) == ncclSuccess) {
     props->ptrSupport |= NCCL_PTR_DMABUF; // GDR support via DMA-BUF
