@@ -19,6 +19,7 @@
 
 #include "debug.h"
 #include "p2p_plugin.h"
+#include "version.h"
 
 
 extern ncclNet_v11_t ibPlugin_v11;
@@ -84,6 +85,9 @@ static nccl_p2p_plugin_t p2p_plugin = NCCL_P2P_LAST;
 
 static void pluginSetup()
 {
+  INFO(NCCL_ALL, "MRC NCCL plugin version %d.%d.%d",
+       MRC_NCCL_PLUGIN_VERSION_MAJOR, MRC_NCCL_PLUGIN_VERSION_MINOR,
+       MRC_NCCL_PLUGIN_VERSION_PATCH);
   p2p_plugin = NCCL_P2P_IB;
   const char *plugin_path = get_plugin_lib_path();
   if (plugin_path != NULL) {

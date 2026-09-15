@@ -36,3 +36,6 @@ or
 ```bash
 export NCCL_NET_PLUGIN=mrc
 ```
+
+With `NCCL_DEBUG=INFO`, plugin initialization logs `MRC NCCL plugin version X.Y.Z`
+through NCCL's logger.
