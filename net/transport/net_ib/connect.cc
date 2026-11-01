@@ -847,8 +847,10 @@ static ncclResult_t ncclIbSenderQpsCreate(ncclIbSendComm* comm, struct ncclIbCon
   qpCreateAttrs.type = IBV_QPT_RC;
   qpCreateAttrs.numQpsPerPeer = nqps;
   qpCreateAttrs.maxRecvWorkRequest = 0;
-  // Send requests are sent using at most 2 messages (RDMA Write and RDMA Write with Immediate)
-  qpCreateAttrs.maxSendWorkRequest = 2 * NET_IB_MAX_REQUESTS;
+  // Send requests are sent using at most 2 messages (RDMA Write and RDMA Write with Immediate).
+  // The extra factor of 2 keeps the in-flight WR count strictly below max_send_wr, which avoids
+  // the MRC syndrome 0x89 issue triggered when in_flight == max_send_wr.
+  qpCreateAttrs.maxSendWorkRequest = 2 * (2 * NET_IB_MAX_REQUESTS);
   for (int qpIndex = 0; qpIndex < nqps; qpIndex++) {
     // The QPs are created in a "striped" manner across the available devices.
     // For example, if there are 2 devices and 4 QPs, the QPs will be created
@@ -1371,7 +1373,9 @@ static ncclResult_t ncclIbReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct n
   // When resiliency is enabled, the number of send work requests is same as the
   // number of max requests because every CTS message is signaled.
   // +1 reserves space for one in-flight speed update RDMA write on qps[0].
-  qpCreateAttrs.maxSendWorkRequest = NET_IB_MAX_REQUESTS * (rComm->base.resiliency ? 1 : 2) +
+  // The extra factor of 2 keeps the in-flight WR count strictly below max_send_wr, which avoids
+  // the MRC syndrome 0x89 issue triggered when in_flight == max_send_wr.
+  qpCreateAttrs.maxSendWorkRequest = 2 * (NET_IB_MAX_REQUESTS * (rComm->base.resiliency ? 1 : 2)) +
                                      ((ncclParamIbEventBasedLb() && ncclParamIbEventBasedLbRemote()) ? 1 : 0);
   for (int qpIndex = 0; qpIndex < nqps; qpIndex++) {
     // The QPs are created in a "striped" manner across the available devices.
