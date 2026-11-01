@@ -479,6 +479,7 @@ ncclResult_t ncclIbQpDestroy(struct ncclIbQp* qp) {
   if (qp->mrcQp != nullptr) {
     NCCLCHECK(wrap_mrc_destroy_qp(qp->mrcQp));
     qp->mrcQp = nullptr;
+    memset(&qp->rqDbr, 0, sizeof(qp->rqDbr));
   }
   if (qp->qp != nullptr) {
     NCCLCHECK(wrap_ibv_destroy_qp(qp->qp));
@@ -521,7 +522,9 @@ ncclResult_t ncclIbQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* crea
     qpInitAttr.cap.max_recv_sge = 1;
     qpInitAttr.cap.max_inline_data = createQpAttrs->maxInlineData;
     NCCLCHECK(ncclIbQpCreateMrcHint(qp, createQpAttrs));
-    ncclResult_t ret = wrap_mrc_create_qp(&qp->mrcQp, createQpAttrs->mrcContext, &qpInitAttr);
+    bool wantRqDbr = createQpAttrs->maxRecvWorkRequest > 0 && ncclIbMrcRqDbrEnabled();
+    ncclResult_t ret =
+      ncclIbMrcCreateQpCaptureRq(&qp->mrcQp, createQpAttrs->mrcContext, &qpInitAttr, wantRqDbr, &qp->rqDbr);
     if (ret == ncclSuccess) ret = wrap_mrc_get_qpn(qp->mrcQp, &qp->qpn);
     if (ret != ncclSuccess) {
       (void)ncclIbQpDestroy(qp);
@@ -1569,8 +1572,11 @@ ncclResult_t ncclIbPostReceiveWorkRequestsOnQp(struct ncclIbRecvComm* recvComm, 
   if (recvComm->base.resiliency) {
     NCCLCHECK(ncclIbResiliencyDataRqSizeGet(recvComm->base.resiliency, dataQp->devIndex, &nRecvWorkRequestsPerQp));
   }
-  INFO(NCCL_NET, "NET/IB: %s: Pre-posting %d Receive WQEs on QP (qp_num=%d, comm=%p)", __func__, nRecvWorkRequestsPerQp,
-       dataQp->qpn, recvComm);
+  bool armedByDbr = false;
+  NCCLCHECK(ncclIbMrcRqDbrArm(&dataQp->rqDbr, dataQp->qpn, nRecvWorkRequestsPerQp, &armedByDbr));
+  INFO(NCCL_NET, "NET/IB: %s: Pre-posting %d Receive WQEs on QP (qp_num=%d, comm=%p) via %s", __func__,
+       nRecvWorkRequestsPerQp, dataQp->qpn, recvComm, armedByDbr ? "doorbell record" : "mrc_post_recv");
+  if (armedByDbr) return ncclSuccess;
   for (int j = 0; j < nRecvWorkRequestsPerQp; j++) {
     struct ibv_recv_wr* badWr;
     NCCLCHECK(wrap_mrc_post_recv(dataQp->mrcQp, &recvComm->ibRecvWorkRequest, &badWr));

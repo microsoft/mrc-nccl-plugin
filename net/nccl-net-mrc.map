@@ -1,6 +1,8 @@
 {
   global:
     ncclNetPlugin_v12;
+    # Pass-through that captures libnv_mrc's DOCA Verbs QP (direct RQ doorbell re-arm).
+    doca_verbs_qp_create;
   local:
     *;
 };
