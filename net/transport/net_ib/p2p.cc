@@ -19,7 +19,7 @@ int64_t ncclIbArThreshold = 8192;
 // By default, use ncclIbRequestMatchingScheme::BY_INDEX matching scheme.
 NCCL_PARAM(IbReceiverSideMatchingScheme, "IB_RECEIVER_SIDE_MATCHING_SCHEME", -2);
 
-const char* ncclIbReqTypeStr[] = {"Unused", "Send", "Recv", "Flush", "IPut"};
+const char* ncclIbReqTypeStr[] = {"Unused", "Send", "Recv", "Flush", "IPut", "IGet"};
 
 ncclResult_t ncclIbGetRequest(struct ncclIbNetCommBase* base, struct ncclIbRequest** req) {
   for (int i = 0; i < NET_IB_MAX_REQUESTS; i++) {
@@ -299,6 +299,8 @@ ncclResult_t ncclIbIsend(void* sendComm, void* data, size_t size, int tag, void*
     *request = NULL;
     return ncclSuccess;
   }
+  // Order the nreqs load after the idx load above; on weakly ordered CPUs it could otherwise return a stale value.
+  std::atomic_thread_fence(std::memory_order_acquire);
   nreqs = slots[0].nreqs;
   // Wait until all data has arrived
   for (int r = 1; r < nreqs; r++) {
@@ -310,7 +312,7 @@ ncclResult_t ncclIbIsend(void* sendComm, void* data, size_t size, int tag, void*
 
     if (size > slots[r].size) size = slots[r].size;
     // Sanity checks
-    if (slots[r].size < 0 || slots[r].addr == 0 || slots[r].rkeys[0] == 0) {
+    if (slots[r].addr == 0 || slots[r].rkeys[0] == 0) {
       char line[SOCKET_NAME_MAXLEN + 1];
       union ncclSocketAddress addr;
       ncclSocketGetAddr(&comm->base.sock, &addr);
@@ -789,9 +791,10 @@ static ncclResult_t ncclIbLogCompletionWithError(struct ncclIbNetCommBase* commB
   ncclSocketGetAddr(&commBase->sock, &addr);
   ncclSocketToString(&addr, sockStr);
   char* hcaName = devBase->pd->context->device->name;
-  WARN("NET/IB: Got completion from peer %s with status=%s(%d) opcode=%s(%d) vendor_err=%u %s%s%s%s hca %s", sockStr,
-       ibvWcStatusStr(wc->status), wc->status, ibvWcOpcodeStr(wc->opcode), wc->opcode, wc->vendor_err,
-       localGidStr ? " localGid " : "", localGidString, remoteGidStr ? " remoteGids" : "", remoteGidString, hcaName);
+  WARN("NET/IB: Got completion from peer %s with status=%s(%d) opcode=%s(%d) vendor_err=%u qp_num=%u %s%s%s%s hca %s",
+       sockStr, ibvWcStatusStr(wc->status), wc->status, ibvWcOpcodeStr(wc->opcode), wc->opcode, wc->vendor_err,
+       wc->qp_num, localGidStr ? " localGid " : "", localGidString, remoteGidStr ? " remoteGids" : "", remoteGidString,
+       hcaName);
   printIbWcStatusHint(wc->status);
   return ncclSuccess;
 }

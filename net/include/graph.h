@@ -64,7 +64,6 @@ static inline uint32_t ncclGdcPinFlag(enum ncclTopoFlushType flush) {
 ncclResult_t ncclTopoNeedFlush(struct ncclComm* comm, int64_t netId, int netDev, int rank,
                                enum ncclTopoFlushType* flush);
 ncclResult_t ncclTopoGetMinNetBw(struct ncclTopoSystem* system, int rank, float* bw);
-ncclResult_t ncclTopoIsGdrAvail(struct ncclTopoSystem* system, int rank, bool* avail);
 ncclResult_t ncclTopoCheckNet(struct ncclTopoSystem* system, int rank1, int rank2, int* net);
 int ncclPxnDisable(struct ncclComm* comm);
 ncclResult_t ncclTopoGetPxnRanks(struct ncclComm* comm, int** intermediateRanks, int* nranks);
@@ -75,6 +74,7 @@ ncclResult_t ncclGetUserP2pLevel(int* level);
 // Find CPU affinity
 ncclResult_t ncclTopoGetCpuAffinity(struct ncclTopoSystem* system, int rank, ncclAffinity* affinity);
 
+#define NCCL_TOPO_CPU_ARCH_UNDEF 0
 #define NCCL_TOPO_CPU_ARCH_X86 1
 #define NCCL_TOPO_CPU_ARCH_POWER 2
 #define NCCL_TOPO_CPU_ARCH_ARM 3
@@ -180,6 +180,7 @@ struct ncclTopoGraph {
   int maxChannels;
   // Output
   int nChannels;
+  int nCtasPerChannel;
   float bwIntra;
   float bwInter;
   float latencyInter;

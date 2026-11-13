@@ -8,6 +8,7 @@
 // are intentionally not included in this standalone network plugin.
 #include "os.h"
 #include "checks.h"
+#include "crypt.h"
 #include "socket.h"
 #include "utils.h"
 
@@ -322,7 +323,7 @@ ncclResult_t ncclSocketClose(struct ncclSocket* sock, bool wait) {
   if (sock->state > ncclSocketStateNone && sock->state < ncclSocketStateNum && ncclOsSocketIsValid(sock)) {
     if (wait) {
       char data;
-      int closed = 0;
+      bool closed = false;
       do {
         int offset = 0;
         if (ncclSocketProgress(NCCL_SOCKET_RECV, sock, &data, sizeof(data), &offset, &closed) != ncclSuccess) break;
@@ -330,6 +331,10 @@ ncclResult_t ncclSocketClose(struct ncclSocket* sock, bool wait) {
     }
     (void)shutdown(sock->socketDescriptor, SHUT_RDWR);
     (void)close(sock->socketDescriptor);
+  }
+  if (sock->crypto) {
+    ncclCryptFree(sock->crypto);
+    sock->crypto = nullptr;
   }
   sock->state = ncclSocketStateClosed;
   sock->socketDescriptor = NCCL_INVALID_SOCKET;

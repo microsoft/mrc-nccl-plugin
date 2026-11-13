@@ -321,7 +321,7 @@ ncclResult_t ncclIbGetGidIndex(struct ibv_context* context, uint8_t portNum, str
 
   // for ROCE
   *gidIndex = ncclParamIbGidIndex();
-  if (*gidIndex >= 0) {
+  if (*gidIndex > NCCL_PARAM_VAL_AUTO) {
     return ncclSuccess;
   }
 
@@ -1198,10 +1198,10 @@ ib_recv_dev_list:
   }
   trafficClass = ncclIbGetTrafficClass(ctx);
   meta.addr = (uint64_t)comm->ctsFifo;
-  meta.sl = (ncclParamIbSl() != -1)                        ? ncclParamIbSl() :
+  meta.sl = (ncclParamIbSl() != NCCL_PARAM_VAL_AUTO)       ? ncclParamIbSl() :
             (trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? trafficClass :
                                                              NCCL_IB_SL_DEFAULT;
-  meta.tc = (envTrafficClass != -1)                        ? envTrafficClass :
+  meta.tc = (envTrafficClass != NCCL_PARAM_VAL_AUTO)       ? envTrafficClass :
             (trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? trafficClass :
                                                              NCCL_IB_TC_DEFAULT;
   meta.remSpeedBufAddr = comm->remoteSpeedMr ? (uint64_t)&comm->remoteSpeedBuf : 0;
@@ -1461,7 +1461,7 @@ static ncclResult_t ncclIbReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct n
     struct ncclIbQpRtrAttr* rtrAttr = &localQp->rtrAttr;
     rtrAttr->mtu = ibDev->portAttr.active_mtu;
     rtrAttr->linkLayer = remDevInfo->link_layer;
-    rtrAttr->tc = (remDevInfo->link_layer == IBV_LINK_LAYER_ETHERNET && ncclParamIbFifoTc() != -1) ?
+    rtrAttr->tc = (remDevInfo->link_layer == IBV_LINK_LAYER_ETHERNET && ncclParamIbFifoTc() != NCCL_PARAM_VAL_AUTO) ?
                     ncclParamIbFifoTc() :
                     remMeta->tc;
     rtrAttr->sl = remMeta->sl;

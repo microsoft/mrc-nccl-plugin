@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
 /*************************************************************************
  * SPDX-FileCopyrightText: Copyright (c) 2017-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
@@ -10,6 +13,10 @@
 
 #include <stdint.h>
 #include "compiler.h"
+
+// The NCCL core parameter registry (param/param.h) is private to libnccl; the
+// standalone plugin keeps using NCCL_PARAM and only needs the AUTO sentinel.
+#define NCCL_PARAM_VAL_AUTO (-1)
 
 const char* userHomeDir();
 void setEnvFile(const char* fileName);

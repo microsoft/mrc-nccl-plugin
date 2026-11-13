@@ -10,7 +10,9 @@
 
 // NCCL's logger owns level/subsystem filtering. Do not access libnccl's
 // private debug globals, or run its debug initialization inside the plugin.
-int ncclDebugLevel = NCCL_LOG_TRACE;
+// Enable every level so all messages reach NCCL's logger. Avoid ~0u and ~1u,
+// which ncclDebugShouldLog treats as uninitialized/reset sentinels.
+uint32_t ncclDebugLevelMask = ~0u >> 1;
 uint64_t ncclDebugMask = NCCL_ALL;
 FILE* ncclDebugFile = stdout;
 thread_local int ncclDebugNoWarn = 0;
