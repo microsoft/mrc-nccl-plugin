@@ -13,6 +13,15 @@ These environment variables control MRC (Multi-Path Reliable Connection) behavio
 | `NCCL_MRC_QP_HINT_ENABLE` | 0 | 0–1 | Enables a hint for each MRC data/CTS QP on both send and receive connections. Set to 0 to skip all QP and CC hints. Ordinary verbs GPU-flush QPs never receive MRC hints. |
 | `NCCL_MRC_MULTI_RECV_ENABLE` | 1 | 0–1 | Enables grouped receives of up to eight tags. Enabled by default. Set `NCCL_MRC_MULTI_RECV_ENABLE=0` to disable grouped receives. |
 | `NCCL_MRC_PREPOST_RECEIVE_WORK_REQUESTS` | 1 | 0 or 1 | Set to 0 to disable preposting. Leave as 1 to enable preposting. |
+| `NCCL_MRC_RQ_DIRECT_DBR` | 1 | 0 or 1 | With preposting, re-arm each consumed receive by publishing the RQ producer index to the QP's doorbell record (one 4-byte store) instead of calling `mrc_post_recv()`. Set to 0 to always use `mrc_post_recv()`. See below. |
+
+### Direct receive doorbell-record re-arm
+
+Receivers only consume RDMA WRITE-with-IMM, which scatters nothing and is matched by `imm_data`, so every receive WQE is the same null entry. With `NCCL_MRC_RQ_DIRECT_DBR=1` and preposting enabled, the plugin writes all receive WQEs of a data QP once, arms the initial receives with one doorbell-record store, and re-arms each completed receive with another store (the UCX `uct_rc_mlx5_iface_update_srq_res()` pattern). Sending and completion polling still use `mrc_post_send()` / `mrc_poll_cq()`.
+
+`mrc.h` does not expose the underlying DOCA Verbs QP, so the plugin exports a pass-through `doca_verbs_qp_create()` that records the QP libnv_mrc creates (attributes are not modified) and matches it to the MRC QP by QP number. If the QP is not captured (for example, `libdoca_verbs` is already in the global symbol scope) or its RQ geometry is unexpected, that QP falls back to `mrc_post_recv()`. A QP never mixes the two modes. `NCCL_DEBUG=INFO` with the `NET` subsystem logs `RQ armed via direct doorbell record` or the fallback reason per QP.
+
+This relies on DOCA Verbs `EXPERIMENTAL` API and on libnv_mrc internals (validated with DOCA 3.2.0412): libnv_mrc creates its QP with `doca_verbs_qp_create()`, and `mrc_poll_cq()` does not compare its receive tail with `mrc_post_recv()`'s head. Recheck after DOCA upgrades.
 
 ## Memory Registration Parameters
 

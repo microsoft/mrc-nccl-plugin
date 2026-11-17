@@ -887,8 +887,12 @@ static inline ncclResult_t ncclIbCompletionEventProcess(struct ncclIbNetCommBase
         int qpIndex = -1;
         NCCLCHECK(ncclIbCommBaseGetQpByQpNum(commBase, devIndex, wc->qp_num, &qp, &qpIndex));
         req->recv.cmplsRecords->completions[qpIndex] = 1;
-        struct ibv_recv_wr* badWr;
-        NCCLCHECK(wrap_mrc_post_recv(qp->mrcQp, &recvComm->ibRecvWorkRequest, &badWr));
+        if (qp->rqDbr.dbr != NULL) {
+          ncclIbMrcRqDbrRepost(&qp->rqDbr);
+        } else {
+          struct ibv_recv_wr* badWr;
+          NCCLCHECK(wrap_mrc_post_recv(qp->mrcQp, &recvComm->ibRecvWorkRequest, &badWr));
+        }
       }
       req->events[devIndex]--;
     } else if (wc->opcode == IBV_WC_RDMA_READ) {
@@ -988,6 +992,12 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
           }
           NCCLCHECK(ncclIbResiliencyHandleCompletionError(r->base->resiliency, wc, i));
         } else {
+          // Pre-posted receives all carry the dummy wr_id and are matched by imm_data. Receives
+          // armed through the doorbell record have no wr_id saved by libnv_mrc, so normalize it.
+          if (wc->opcode == IBV_WC_RECV_RDMA_WITH_IMM && !r->base->isSend &&
+              ((struct ncclIbRecvComm*)r->base)->prepostReceiveWorkRequests) {
+            wc->wr_id = NCCL_IB_RECV_WR_ID_DUMMY;
+          }
           if (ncclIbWqeLatEnabled) ncclIbWqeLatHandleCompletion(r->base, i, wc, &tPollNs, &tPollNsValid);
           TRACE(NCCL_NET,
                 "NET/IB: %s: Processing a completion event (devIndex=%d, comm=%p (%s), req=%p, wr_id=%lu, qp_num=%d)",

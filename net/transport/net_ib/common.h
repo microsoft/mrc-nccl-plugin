@@ -34,6 +34,7 @@
 #include "ibvwrap.h"
 #include "mlx5/mlx5dvwrap.h"
 #include "wqe_lat_mon.h"
+#include "mrc_rq_dbr.h"
 
 #define MAXSUFFIXSIZE 16
 #define MAXNAMESIZE (64 + MAXSUFFIXSIZE)
@@ -333,6 +334,8 @@ struct ncclIbQp {
   struct ncclIbWqeLatMon latMon;
   // Inline send capacity the provider granted at creation; consulted only when IBV_SEND_INLINE is set.
   uint32_t maxInlineData;
+  // Direct doorbell-record re-arm of pre-posted receives (MRC receiver data QPs only).
+  struct ncclIbMrcRqDbr rqDbr;
 };
 
 // We need to support NCCL_NET_MAX_REQUESTS for each concurrent receive
