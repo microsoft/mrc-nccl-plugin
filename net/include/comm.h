@@ -123,6 +123,18 @@ struct ncclCommEventCallback {
   ncclResult_t (*fn)(struct ncclComm* comm, struct ncclCommEventCallback* cb);
 };
 
+struct ncclUncapturedStreamPoolNode {
+  cudaStream_t stream;
+  struct ncclUncapturedStreamPoolNode* next;
+};
+
+struct ncclUncapturedStreamPool {
+  struct ncclUncapturedStreamPoolNode* head;
+};
+
+ncclResult_t ncclUncapturedStreamPoolAcquire(struct ncclUncapturedStreamPool* pool, cudaStream_t* stream);
+ncclResult_t ncclUncapturedStreamPoolDestroy(struct ncclUncapturedStreamPool* pool);
+
 struct ncclSharedResources {
   int refCount;
   struct ncclComm* owner; /* comm which creates this shared res. */
@@ -145,12 +157,10 @@ struct ncclSharedResources {
   struct ncclStrongStream deviceStream, hostStream;
   int persistentRefs;
   cudaEvent_t launchEvent, scratchEvent;
+  struct ncclUncapturedStreamPool uncapturedStreamPool;
 
   /* proxy related shared res */
   struct ncclProxyState* proxyState;
-
-  // GIN state
-  struct ncclGinState ginState;
 };
 
 struct ncclChannel {
@@ -207,6 +217,7 @@ struct ncclTaskColl {
   ncclRedOp_t opHost;
   struct ncclDevRedOpFull opDev;
   int chunkSteps, sliceSteps;
+  int minChunkPayloadBytes;
   // Computed later:
   size_t trafficBytes;
   int32_t nMaxChannels:8;
@@ -215,6 +226,7 @@ struct ncclTaskColl {
   uint32_t isCollnet:1, isNvls:1, isSymLast:1;
   uint32_t devFuncId:29;
   int regBufType;
+  cudaEvent_t launchCompletionEvent;
   // number of elements in planner->ipcMemQueue associated with this collective
   int nCleanupQueueElts;
 
@@ -234,9 +246,9 @@ struct ncclTaskColl {
 
   // Profiler plugin
   int eActivationMask;
-  void* groupApiEventHandle;
-  void* collApiEventHandle;
-  void* eventHandle;
+  struct ncclProfilerEventRef groupApiEventHandle;
+  struct ncclProfilerEventRef collApiEventHandle;
+  struct ncclProfilerEventRef eventHandle;
   uint8_t nChannels;
   // Inclusive channel range this task ran on; mirrors devWork->channelLo/Hi.
   uint8_t channelLo;
@@ -273,9 +285,9 @@ struct ncclTaskBcast {
 
   // Profiler plugin
   int eActivationMask;
-  void* groupApiEventHandle;
-  void* collApiEventHandle;
-  void* eventHandle;
+  struct ncclProfilerEventRef groupApiEventHandle;
+  struct ncclProfilerEventRef collApiEventHandle;
+  struct ncclProfilerEventRef eventHandle;
   uint8_t nChannels;
   uint64_t profilerTag; // Per-call profiler annotation (0 == untagged)
 };
@@ -290,12 +302,15 @@ struct ncclTaskP2p {
   int root;
   size_t bytes;
   bool allowUB;
+  int maxCTAs;
+  int collOpCount; // Zero for explicit P2P; otherwise identifies the originating collective.
+  cudaEvent_t launchCompletionEvent;
 
   // Profiler plugin
   int eActivationMask;
-  void* groupApiEventHandle;
-  void* p2pApiEventHandle;
-  void* eventHandle;
+  struct ncclProfilerEventRef groupApiEventHandle;
+  struct ncclProfilerEventRef p2pApiEventHandle;
+  struct ncclProfilerEventRef eventHandle;
   uint8_t nChannels;
   uint64_t profilerTag; // Per-call profiler annotation (0 == untagged)
   // Per-direction channels used by this task; read by the profiler to emit and
@@ -333,9 +348,9 @@ struct ncclTaskRma {
 
   // Profiler plugin
   int eActivationMask;
-  void* groupApiEventHandle;
-  void* rmaApiEventHandle;
-  void* eventHandle;
+  struct ncclProfilerEventRef groupApiEventHandle;
+  struct ncclProfilerEventRef rmaApiEventHandle;
+  struct ncclProfilerEventRef eventHandle;
   uint8_t nChannels;
 };
 
@@ -371,6 +386,7 @@ struct ncclKernelPlan {
   uint16_t p2pPairCounter;
   int threadPerBlock;
   int cgaClusterSize;  // per-launch CGA cluster size; defaults to comm->config.cgaClusterSize
+  cudaEvent_t launchCompletionEvent;
 
   int collOpCount; // Number of collectives in this plan.
   int nWorkBatches; // Number of work batches.
@@ -388,9 +404,9 @@ struct ncclKernelPlan {
   struct ncclIntruQueue<struct ncclProxyOp, &ncclProxyOp::enqNext> proxyOpQueue;
 
   // Profiler plugin
-  void* groupApiEventHandle;
-  void* kernelLaunchEventHandle;
-  void* groupEventHandle;
+  struct ncclProfilerEventRef groupApiEventHandle;
+  struct ncclProfilerEventRef kernelLaunchEventHandle;
+  struct ncclProfilerEventRef groupEventHandle;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -481,6 +497,10 @@ struct ncclKernelPlanner {
   struct Peer* peers /*[nRanks]*/;
   int nTasksColl, nTasksP2p, nTasksBcast, nTasksRma;
   int nTasksP2pSend, nTasksP2pRecv;
+  int p2pCollOpCount;
+  bool p2pCollNeedsIsolation;
+  struct ncclIntruQueue<struct ncclTaskP2p, &ncclTaskP2p::next> p2pCollTaskQueue;
+  int nCollConfigLaunchCompletionEvents; // Original event-bearing collective requests in this group.
 
   struct {
     int minBcastPeer;  /* initialized to INT_MAX */
@@ -617,6 +637,9 @@ struct ncclComm {
   int64_t busId;   // my PCI bus ID in int format
   ncclAffinity cpuAffinity; // CPU affinity of the GPU
   int cudaArch; // matches __CUDA_ARCH__ of device
+  int maxSharedMemOptin; // cudaDevAttrMaxSharedMemoryPerBlockOptin for cudaDev
+  int minDriverVersion; // min CUDA driver version
+  bool cuMemGdrSupport;  // global cuMem GDR support
 
   int cpuArch;   // architecture - As defined in src/include/graph.h, e.g. x86/arm/ppc/mixed
   int cpuVendor; // vendor - As defined in src/include/graph.h
@@ -663,6 +686,9 @@ struct ncclComm {
   int p2pnChannelsPerPeer;
   int p2pSchedGroupSize;
   int p2pMaxPeers;
+  // A2A NET peer envelope derived from the P2P channel schedule.
+  int p2pA2aMinPeers;
+  int p2pA2aMaxPeers;
 
   // Should this comm allocate LL buffers for network P2P connections?
   bool allocP2pNetLLBuffers;
@@ -732,8 +758,8 @@ struct ncclComm {
   struct ncclCollNetSharedRes* collNetSharedRes;
 
   // NVLink SHARP (NVLS) support
-  int nvlsSupport;
-  int nvlsRegSupport;
+  int nvlsSupport; // NVLS multicast capability, including device runtime use. NCCL_NVLS_ENABLE can override.
+  int nvlsRegSupport; // host NVLS user-buffer registration supported
   /* sharable NVLS resource. */
   struct ncclNvlsSharedRes* nvlsResources;
 
@@ -801,12 +827,27 @@ struct ncclComm {
 
   // Profiler plugin
   void* profilerContext;
+  // Host-side collective sequence counters maintained by profiler support and
+  // also used by RAS; they are independent of GPU completed-work counters.
   uint64_t seqNumber[NCCL_NUM_FUNCTIONS];
   struct ncclProfilerCommState profiler;
+
+  // RAS GPU-resident counters support
+  // Pinned host mirror of the NCCL progress counters.
+  struct ncclProgressCountersBlock* hostCountersBlock;
+  // Device counters written by kernels.
+  struct ncclProgressCountersBlock* deviceCountersBlock;
+  // CPU/GPU timer offset cached per device.
+  int64_t gpuTimerOffsetNs;
+  // Intrusive link in the per-device progress-counter registration list.
+  struct ncclComm* nextProgressRegistration;
 
   // RMA state
   struct ncclRmaState rmaState;
   struct ncclIntruQueue<struct ncclRmaCeInitTask, &ncclRmaCeInitTask::next> rmaCeInitTaskQueue;
+
+  // GIN state
+  struct ncclGinState ginState;
 
   // Debug check
   struct ncclIntruQueue<struct ncclArgsInfo, &ncclArgsInfo::next> argsInfoQueue;
@@ -823,6 +864,8 @@ struct ncclComm {
   bool isAllDirectNvlink; // All GPUs are directly connected to each other through NVLink.
   int symmetricSupport;
   int gpuCftSupport;
+  bool gpuCftMulticastSupport;
+  bool gpuCftCountedSupport;
   bool useNetPXN;
   bool useGdr;
   bool hasMloPart; // if mlopart is used
@@ -830,6 +873,11 @@ struct ncclComm {
   ncclGinConnectionType_t globalGinSupport;
   bool globalRmaProxySupport;
   bool hostRmaSupport;
+
+  int rmaBaseStride;      // determined by NIC
+  uint32_t rmaBaseStride_rcp32; // idivRcp32(rmaBaseStride) for idivFast32 on the proxy hot path
+  int rmaUserCtxStride;   // determined by NVLD/user environment variable
+
   int childCount;
 
   struct ncclDevrState devrState; // The symmetric runtime state
@@ -841,6 +889,14 @@ struct ncclComm {
 
   uint64_t endMagic;
 };
+
+inline bool ncclNvlsTransportEnabled(const struct ncclComm* comm) {
+  return comm->nvlsSupport && !(comm->config.nvlsHostMode & ncclNvlsHostModeDisableTransport);
+}
+
+inline bool ncclNvlsSymmetricMultimemEnabled(const struct ncclComm* comm) {
+  return comm->nvlsSupport && !(comm->config.nvlsHostMode & ncclNvlsHostModeDisableSymmetricMultimem);
+}
 
 static_assert(offsetof(struct ncclComm, startMagic) == 0, "startMagic must be the first field of ncclComm");
 static_assert(offsetof(struct ncclComm, endMagic) == sizeof(struct ncclComm) - sizeof(uint64_t),
@@ -869,6 +925,13 @@ inline ncclResult_t ncclCommPollCallbacks(struct ncclComm* comm, bool waitSome) 
   }
   NCCLCHECK(result);
   return ncclSuccess;
+}
+
+inline int ncclCommNMaxChannels(struct ncclComm* comm, int isCollNet, int isNvls) {
+  if (isCollNet && isNvls) return std::min(comm->nChannels, comm->nvlsChannels);
+  if (isCollNet /* &&!isNvls */) return comm->nChannels;
+  if (/* !isCollNet&& */ isNvls) return comm->nvlsChannels;
+  /*if ( !isCollNet&& !isNvls)*/ return comm->nChannels;
 }
 
 inline ncclResult_t ncclCommPollEventCallbacks(struct ncclComm* comm, bool waitSome) {
@@ -953,6 +1016,8 @@ static inline ncclRedOp_t ncclUserRedOpMangle(ncclComm* comm, ncclRedOp_t op) {
 
 ncclResult_t ncclCommEnsureReady(ncclComm_t comm);
 ncclResult_t ncclCommSetAsyncError(ncclComm_t comm, ncclResult_t nextState);
+ncclResult_t ncclComputeBuffSizes(struct ncclComm* comm);
+ncclResult_t ncclParseCommConfig(ncclComm_t comm, ncclConfig_t* config);
 
 // Process-wide NCCL_CTA_POLICY env override, or NCCL_CONFIG_UNDEF_INT when unset/invalid.
 int ncclGetEnvCtaPolicy();
