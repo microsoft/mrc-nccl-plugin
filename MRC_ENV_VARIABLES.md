@@ -32,6 +32,17 @@ The rebased plugin preserves the legacy version-1 CC payload: if any effective r
 
 Each hint advertises `num_qps_per_peer` equal to the connection's negotiated QP count and `num_send_peers=1`. It is attached during INIT and destroyed only after its QP. As in the legacy plugin, hint creation/attachment failures fail the connection; the requested configuration is not silently discarded. `NCCL_DEBUG=INFO` with the `NET` subsystem logs the effective rates. The rate units are provider-specific, not bits per second (the NVIDIA provider uses 1048576 for line rate).
 
+## RMA Plugin Parameters
+
+These apply to the RMA plugin (GIN CPU proxy and host RMA backend); see [rma/README.md](rma/README.md).
+
+| Variable | Default | Range | Description |
+|---|---|---|---|
+| `NCCL_GIN_IB_TC` | -1 | -1–255 | Traffic class of the RMA QPs. -1 uses `NCCL_IB_TC`. |
+| `NCCL_RMA_IB_WR_BATCHSIZE` | 64 | 4–64 | Maximum work requests posted with one doorbell. |
+| `NCCL_MRC_RMA_POLL_COUNT` | 16 | 1–64 | Receive completions (signals) reaped per peer per progress call. |
+| `NCCL_MRC_RMA_SIGNAL_MAP_MAX` | 67108864 | bytes | Largest strictly ordered registration that can be a signal target; larger ones are not mapped for signals. |
+
 ## Rebased Plugin Diagnostics
 
 - The initialization banner uses NCCL `INFO` logging once on global rank zero, identified from `OMPI_COMM_WORLD_RANK`, `PMI_RANK`, `PMIX_RANK`, `RANK`, or `SLURM_PROCID` (in that order). It respects `NCCL_DEBUG`/`NCCL_DEBUG_SUBSYS`. When no global rank is known, the optional banner is omitted rather than repeated on every process.
