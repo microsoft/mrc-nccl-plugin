@@ -60,9 +60,8 @@ NCCL registers each signal buffer with `NCCL_NET_MR_FLAG_FORCE_SO`. When such a 
 CPU stores. Registration is collective, so every rank picks the same id; the plugin checks this in the
 registration's all-gather.
 
-* GPU buffers are mapped with GDRCopy. On a GPU the CPU reaches over coherent C2C (GB200), the mapping is forced
-  onto PCIe (`GDR_PIN_FLAG_FORCE_PCIE`, GDRCopy >= 2.5), the same path as the NIC's payload writes, so the signal
-  store is ordered behind the data. Host buffers are written directly.
+* GPU buffers are mapped with GDRCopy, on the path the NIC's payload writes take into GPU memory, so the signal
+  store lands behind the data (see [Data Direct](#data-direct)). Host buffers are written directly.
 * Buffers registered with `NCCL_NET_MR_FLAG_SIGNAL_NEVER_RESET` are only written by the plugin, so it keeps their
   values on the host; others are read, added to and written back.
 
@@ -76,14 +75,40 @@ registration's all-gather.
 The value added is `value << (digit * M)`. An add that needs more than one base-2^M digit is sent as one
 immediate per nonzero digit, at most 4, with the payload on the last. Increments always fit in one. A buffer can
 have at most 2^23 slots (64 MiB), and an add must be below 2^(4M) (for example 2^24 with 2^18 slots), otherwise the
-operation fails with an error.
+operation fails with an error. NCCL's GIN signal buffer has `ginSignalCount` slots per GIN context on the collective comm. With Data
+Direct each GPU uses one NIC, so all of its contexts share one comm and buffer, which leaves fewer value bits than
+with one comm per NIC.
+
+### Data Direct
+
+The GPU must not see a signal before its payload. The NIC's payload writes and the CPU's signal store therefore
+have to enter GPU memory on the same path. The plugin picks the GDRCopy mapping per collective comm, the way NCCL
+picks it for its own GDRCopy sync word (`NCCL_GDRCOPY_SYNC_ENABLE`, `ncclTopoNeedFlush`, `ncclGdcPinFlag`):
+
+| NIC | Payload path into GPU memory | Signal mapping |
+|---|---|---|
+| Regular function (`NCCL_IB_DATA_DIRECT=0`) | C2C on GB200 (PCIe on non-C2C GPUs) | default GDRCopy mapping (C2C on GB200) |
+| Data Direct (`mlx5_N_dma`) behind the GPU's root port | PCIe switch shared with the GPU | `GDR_PIN_FLAG_FORCE_PCIE` (GDRCopy >= 2.5) |
+
+On GB200 each CX-8 exposes a Data Direct DMA function in its GPU's PCIe domain, so with Data Direct each GPU has
+one local NIC. Collective comm setup fails, with a message, when:
+* a Data Direct NIC is not behind the GPU's root port;
+* a merged device mixes Data Direct and regular NICs;
+* GDRCopy cannot force PCIe mappings.
+
+GPU memory on a Data Direct device must be registered through DMA-BUF (NCCL's default).
+
+When NCCL's host RMA keeps its signals in host memory (NCCL GDRCopy off), it flushes the NIC-GPU path itself with
+a strict-order loopback put before releasing the GPU. The plugin serves that put like any other.
 
 ## Requirements and limitations
 
-* GDRCopy on every node, with FORCE_PCIE support on GB200. Without it, GPU signal buffers cannot be mapped and
-  signals to them fail.
-* Data Direct is not supported: Data Direct payload writes are not ordered with the CPU's signal stores, and MRC
-  has no RDMA Read to flush them. Set `NCCL_IB_DATA_DIRECT=0`; context creation fails on a Data Direct device.
+* GDRCopy on every node, with FORCE_PCIE support when Data Direct is used on GB200. Without GDRCopy, GPU signal
+  buffers cannot be mapped and signals to them fail.
+* With Data Direct, every rank must use its GPU's local NIC. On fabrics with disjoint planes, all ranks that talk
+  to each other must then sit on GPUs whose local NICs share a plane, since MRC QPs cannot connect across planes.
+  This applies to the NET plugin as well (cross-plane `mrc_modify_qp` errors). Otherwise set
+  `NCCL_IB_DATA_DIRECT=0`, where all NICs are equally far from every GPU.
 * `get` and `flush` fail (no RDMA Read), and so do signals to arbitrary windows (GIN VA signals). NCCL's GIN
   symmetric kernels use VA signals; keep them off (`NCCL_SYM_GIN_KERNELS_ENABLE=0`) when they would engage.
 * At most 64 signal buffers per collective comm can be live at once. Each host RMA context takes three and each

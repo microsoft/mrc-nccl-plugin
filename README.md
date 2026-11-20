@@ -48,7 +48,7 @@ With `NCCL_DEBUG=INFO`, verify `Loaded net plugin MRC (v12)`, `Using network MRC
 The RMA plugin (`ncclRmaPlugin_v17`) is built into `libnccl-net-mrc.so` with the NET plugin, and NCCL loads it from
 the NET plugin library. Stock NCCL (2.32 or later) then runs its GIN CPU proxy (`NCCL_GIN_TYPE=2`) and its host RMA
 API (`ncclPutSignal`, `ncclWaitSignal`) over MRC, with signals carried as RDMA Write-with-Immediate. It needs
-GDRCopy and `NCCL_IB_DATA_DIRECT=0`. Build with `make net RMA=0` to leave it out. See [rma/README.md](rma/README.md).
+GDRCopy and works with or without Data Direct (`NCCL_IB_DATA_DIRECT`). Build with `make net RMA=0` to leave it out. See [rma/README.md](rma/README.md).
 
 ## Tuner plugin
 

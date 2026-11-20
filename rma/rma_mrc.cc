@@ -18,8 +18,11 @@
 // signal buffer.
 
 #include <atomic>
+#include <limits.h>
 #include <mutex>
 #include <new>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 #include "transport/net_ib/common.h"
@@ -94,6 +97,8 @@ struct mrcRmaCollComm {
   void* recvComm;
   void* sendComm;
   volatile uint32_t* abortFlag;
+  bool dataDirect;       // the device writes GPU memory through Data Direct
+  uint32_t sigPinFlags;  // GDRCopy pin flags for signal buffers, see mrcRmaSetupSignalPath
   std::mutex sigMutex;
   std::atomic<struct mrcRmaMrHandle*> sigMrs[MRC_RMA_SIG_IDS];
 };
@@ -244,6 +249,7 @@ static ncclResult_t mrcRmaGdrSupport(int dev) {
 }
 
 static ncclResult_t mrcRmaCloseColl(void* collComm);
+static ncclResult_t mrcRmaSetupSignalPath(struct mrcRmaCollComm* cComm);
 
 static ncclResult_t mrcRmaConnect(void* ctx, void* handles[], int nranks, int rank, void* listenComm, void** collComm,
                                   volatile uint32_t* abortFlag) {
@@ -261,6 +267,7 @@ static ncclResult_t mrcRmaConnect(void* ctx, void* handles[], int nranks, int ra
   cComm->abortFlag = abortFlag;
 
   int next = (rank + 1) % nranks;
+  NCCLCHECKGOTO(mrcRmaSetupSignalPath(cComm), ret, fail);
   do {
     if (cComm->sendComm == NULL) {
       NCCLCHECKGOTO(ncclIbConnectImpl(ctx, lComm->dev, handles[next], &cComm->sendComm, NULL, /*nQpsPerDev*/ 1,
@@ -297,35 +304,102 @@ static ncclResult_t mrcRmaCloseColl(void* collComm) {
 
 /* ── Memory registration and signal buffers ───────────────────────────── */
 
-// On a GPU the CPU reaches over a coherent C2C link (e.g. Grace), a default GDRCopy mapping goes over C2C,
-// which is not ordered with the NIC's payload writes over PCIe. Force signal mappings onto PCIe there.
-static ncclResult_t mrcRmaSignalPinFlags(uint32_t* pinFlags) {
-  *pinFlags = GDR_PIN_FLAG_DEFAULT;
+// True when the PCI devices at sysfs paths a and b share the same root port, i.e. sit under one PCIe switch
+// hierarchy and do not cross the host bridge.
+static bool mrcRmaPciNear(const char* a, const char* b) {
+  char *ra = realpath(a, NULL), *rb = realpath(b, NULL);
+  bool near = false;
+  if (ra && rb) {
+    // Paths look like /sys/devices/pciDDDD:BB/<root port>/<switch port>/.../<device>
+    int shared = 0;
+    const char *pa = ra, *pb = rb;
+    while (*pa && *pa == *pb) {
+      if (*pa == '/' && pa != ra) shared++;
+      pa++, pb++;
+    }
+    if (*pa == '\0' && (*pb == '/' || *pb == '\0')) shared++;
+    // Shared components: "sys", "devices", "pciDDDD:BB", root port.
+    near = shared >= 4;
+  }
+  free(ra);
+  free(rb);
+  return near;
+}
+
+/* The CPU's signal store must reach GPU memory on the same path as the NIC's payload writes, or the GPU can see a
+ * signal before its data. This follows NCCL's choice for its own GDRCopy sync word (ncclTopoNeedFlush and
+ * ncclGdcPinFlag, used with NCCL_GDRCOPY_SYNC_ENABLE):
+ *  - regular NIC: the payload reaches GPU memory over C2C on a C2C-coherent GPU (PCIe otherwise), the same path
+ *    as a default GDRCopy mapping;
+ *  - Data Direct NIC on a C2C-coherent GPU: the payload arrives over the PCIe switch the NIC shares with the GPU,
+ *    so signal mappings are forced onto PCIe (GDR_PIN_FLAG_FORCE_PCIE, GDRCopy >= 2.5). A Data Direct NIC that is
+ *    not behind the GPU's root port, or a merged device mixing both kinds, has no ordered path and is refused.
+ */
+static ncclResult_t mrcRmaSetupSignalPath(struct mrcRmaCollComm* cComm) {
+  cComm->dataDirect = false;
+  cComm->sigPinFlags = GDR_PIN_FLAG_DEFAULT;
+  struct ncclIbMergedDev* mDev = &ncclIbMergedDevs[cComm->dev];
+  int nDataDirect = 0;
+  for (int i = 0; i < mDev->vProps.ndevs; i++) {
+    struct ncclIbDev* ibDev = &ncclIbDevs[mDev->vProps.devs[i]];
+    if (ibDev->ibProvider == IB_PROVIDER_MLX5 && ibDev->capsProvider.mlx5.dataDirect) nDataDirect++;
+  }
+  if (nDataDirect == 0) return ncclSuccess;
+  if (nDataDirect != mDev->vProps.ndevs) {
+    WARN("NET/MRC/RMA: device %s mixes Data Direct and regular NICs; their writes reach GPU memory on different "
+         "paths, so signals cannot be ordered behind data",
+         mDev->devName);
+    return ncclInvalidUsage;
+  }
+  cComm->dataDirect = true;
+
   int cudaDev, c2cCoherent = 0;
   CUDACHECK(cudaGetDevice(&cudaDev));
   CUDACHECK(cudaDeviceGetAttribute(&c2cCoherent, cudaDevAttrPageableMemoryAccessUsesHostPageTables, cudaDev));
   if (!c2cCoherent) return ncclSuccess;
-  int forcePcie = 0;
-  if (ncclGdrPinV2Available()) {
-    if (ncclGdrIsInternalDmaBufBackend()) {
-      forcePcie = 1;
-    } else if (wrap_gdr_get_attribute(ncclGdrCopy, GDR_ATTR_SUPPORT_PIN_FLAG_FORCE_PCIE, &forcePcie) != ncclSuccess) {
-      forcePcie = 0;
+
+  int domain = 0, bus = 0, device = 0;
+  CUDACHECK(cudaDeviceGetAttribute(&domain, cudaDevAttrPciDomainId, cudaDev));
+  CUDACHECK(cudaDeviceGetAttribute(&bus, cudaDevAttrPciBusId, cudaDev));
+  CUDACHECK(cudaDeviceGetAttribute(&device, cudaDevAttrPciDeviceId, cudaDev));
+  char gpuPath[PATH_MAX];
+  snprintf(gpuPath, sizeof(gpuPath), "/sys/bus/pci/devices/%04x:%02x:%02x.0", domain, bus, device);
+  for (int i = 0; i < mDev->vProps.ndevs; i++) {
+    struct ncclIbDev* ibDev = &ncclIbDevs[mDev->vProps.devs[i]];
+    if (ibDev->pciPath == NULL || !mrcRmaPciNear(gpuPath, ibDev->pciPath)) {
+      WARN("NET/MRC/RMA: Data Direct NIC %s (%s) is not behind the root port of GPU %d (%s), so its writes are not "
+           "ordered with signal stores. Use the GPU's local NIC or set NCCL_IB_DATA_DIRECT=0",
+           ibDev->devName, ibDev->pciPath ? ibDev->pciPath : "unknown", cudaDev, gpuPath);
+      return ncclInvalidUsage;
     }
   }
-  if (!forcePcie) {
-    WARN("NET/MRC/RMA: GPU %d is C2C-coherent but GDRCopy cannot map signals on PCIe (needs GDRCopy >= 2.5 with "
-         "FORCE_PCIE support), so a signal could become visible before its payload",
-         cudaDev);
-    return ncclInvalidUsage;
+
+  if (ncclGdrCopy != NULL) {
+    int forcePcie = 0;
+    if (ncclGdrPinV2Available()) {
+      if (ncclGdrIsInternalDmaBufBackend()) {
+        forcePcie = 1;
+      } else if (wrap_gdr_get_attribute(ncclGdrCopy, GDR_ATTR_SUPPORT_PIN_FLAG_FORCE_PCIE, &forcePcie) !=
+                 ncclSuccess) {
+        forcePcie = 0;
+      }
+    }
+    if (!forcePcie) {
+      WARN("NET/MRC/RMA: Data Direct on GPU %d needs GDRCopy >= 2.5 with FORCE_PCIE support to map signals on PCIe; "
+           "set NCCL_IB_DATA_DIRECT=0 otherwise",
+           cudaDev);
+      return ncclInvalidUsage;
+    }
   }
-  *pinFlags = GDR_PIN_FLAG_FORCE_PCIE;
+  cComm->sigPinFlags = GDR_PIN_FLAG_FORCE_PCIE;
+  INFO(NCCL_INIT | NCCL_NET, "NET/MRC/RMA: device %s uses Data Direct; signals are mapped on PCIe for GPU %d",
+       mDev->devName, cudaDev);
   return ncclSuccess;
 }
 
 // Map a signal buffer for CPU stores. Failure leaves sigCpu NULL: the MR keeps its id, so ids stay
 // consistent across ranks, and a signal that later targets it on this rank reports the error.
-static void mrcRmaMapSignals(struct mrcRmaMrHandle* mr, void* data, int type) {
+static void mrcRmaMapSignals(struct mrcRmaCollComm* cComm, struct mrcRmaMrHandle* mr, void* data, int type) {
   if (type == NCCL_PTR_HOST) {
     mr->sigCpu = (volatile uint64_t*)data;
     return;
@@ -334,10 +408,8 @@ static void mrcRmaMapSignals(struct mrcRmaMrHandle* mr, void* data, int type) {
     WARN("NET/MRC/RMA: cannot map signal buffer %p (%zu bytes): GDRCopy is unavailable", data, mr->bytes);
     return;
   }
-  uint32_t pinFlags;
-  if (mrcRmaSignalPinFlags(&pinFlags) != ncclSuccess) return;
   gdr_info_t info;
-  if (ncclGdrCudaMapPointer(data, mr->bytes, &mr->gdrMh, &mr->gdrMap, &mr->gdrMapSize, &info, pinFlags) !=
+  if (ncclGdrCudaMapPointer(data, mr->bytes, &mr->gdrMh, &mr->gdrMap, &mr->gdrMapSize, &info, cComm->sigPinFlags) !=
       ncclSuccess) {
     WARN("NET/MRC/RMA: GDRCopy could not map signal buffer %p (%zu bytes)", data, mr->bytes);
     mr->gdrMap = NULL;
@@ -406,6 +478,15 @@ static ncclResult_t mrcRmaRegMrSymDmaBuf(void* collComm, void* data, size_t size
   NCCLCHECKGOTO(ncclCalloc(&mr, 1), ret, fail);
   mr->sigId = -1;
   mr->bytes = size;
+  if (cComm->dataDirect && type == NCCL_PTR_CUDA && fd < 0) {
+    // Without a DMA-BUF the NIC reaches this memory through its regular function, not the Data Direct path
+    // signals are ordered with.
+    WARN("NET/MRC/RMA: GPU memory %p must be registered through DMA-BUF on a Data Direct device; enable "
+         "NCCL_DMABUF_ENABLE or set NCCL_IB_DATA_DIRECT=0",
+         data);
+    ret = ncclInvalidUsage;
+    goto fail;
+  }
 
   NCCLCHECKGOTONOWARN(ncclIbRegMrDmaBufInternal(cComm->recvComm, data, size, type, offset, fd, mrFlags,
                                                 (void**)&mr->mrHandle),
@@ -419,7 +500,7 @@ static ncclResult_t mrcRmaRegMrSymDmaBuf(void* collComm, void* data, size_t size
     mr->neverReset = (mrFlags & NCCL_NET_MR_FLAG_SIGNAL_NEVER_RESET) != 0;
     // Never-reset buffers are zeroed before registration and only ever written by us.
     if (mr->neverReset) NCCLCHECKGOTO(ncclCalloc(&mr->shadow, size / sizeof(uint64_t)), ret, fail);
-    mrcRmaMapSignals(mr, data, type);
+    mrcRmaMapSignals(cComm, mr, data, type);
   }
 
   local.va = (uintptr_t)data;
@@ -542,18 +623,8 @@ static ncclResult_t mrcRmaCreateContext(void* collComm, ncclRmaConfig_v17_t* con
   struct mrcRmaCtx* ctxs = NULL;
   void* lComm = NULL;
   char *handle = NULL, *handles = NULL;
-  *rmaCtx = NULL;
-
-  // Signals are applied by the CPU, which is only ordered with the payload when the NIC writes it over the
-  // regular PCIe path; Data Direct would need an RDMA-read flush that MRC does not have.
   struct ncclIbMergedDev* mDev = &ncclIbMergedDevs[cComm->dev];
-  for (int i = 0; i < mDev->vProps.ndevs; i++) {
-    struct ncclIbDev* ibDev = &ncclIbDevs[mDev->vProps.devs[i]];
-    if (ibDev->ibProvider == IB_PROVIDER_MLX5 && ibDev->capsProvider.mlx5.dataDirect) {
-      WARN("NET/MRC/RMA: Data Direct device %s is not supported, set NCCL_IB_DATA_DIRECT=0", ibDev->devName);
-      return ncclInvalidUsage;
-    }
-  }
+  *rmaCtx = NULL;
 
   ncclIbSetTrafficClass(cComm->ctx, config->trafficClass);
 
