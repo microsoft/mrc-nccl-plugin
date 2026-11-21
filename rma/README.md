@@ -49,14 +49,15 @@ both share one device list, one MRC context per NIC and one MR cache per process
   its proxy threads, reaps the receive completion and adds the value to the signal through a CPU mapping. MRC
   generates the receive completion only after the whole message is placed, so a signal is never visible before
   its data.
-* **Receive queues**: each signal consumes a receive WR. Every receive QP keeps 128 buffer-less WRs posted, refilled
+* **Get**: a receiver-driven write, since MRC has no RDMA Read (see [Get](#get)).
+* **Receive queues**: each signal or get message consumes a receive WR. Every receive QP keeps 128 buffer-less WRs posted, refilled
   in batches of 32; if `net_ib` pre-posted its own WRs at accept (`NCCL_MRC_PREPOST_RECEIVE_WORK_REQUESTS`, on by
   default), those set the depth.
 
 ### Signal buffers
 
 NCCL registers each signal buffer with `NCCL_NET_MR_FLAG_FORCE_SO`. When such a registration is at most
-`NCCL_MRC_RMA_SIGNAL_MAP_MAX` bytes, the plugin gives it one of 64 signal ids of its collective comm and maps it for
+`NCCL_MRC_RMA_SIGNAL_MAP_MAX` bytes, the plugin gives it one of 63 signal ids of its collective comm and maps it for
 CPU stores. Registration is collective, so every rank picks the same id; the plugin checks this in the
 registration's all-gather.
 
@@ -78,6 +79,38 @@ have at most 2^23 slots (64 MiB), and an add must be below 2^(4M) (for example 2
 operation fails with an error. NCCL's GIN signal buffer has `ginSignalCount` slots per GIN context on the collective comm. With Data
 Direct each GPU uses one NIC, so all of its contexts share one comm and buffer, which leaves fewer value bits than
 with one comm per NIC.
+
+### Get
+
+Each context has, per peer, `NCCL_MRC_RMA_GET_SLOTS` descriptor slots in an inbox and an outbox, all in one host
+buffer registered collectively at context creation.
+
+1. `iget` writes a 32-byte descriptor into its slot of the target's inbox: the source and destination memory
+   regions, offsets and size. It uses a Write-with-Immediate carrying `GET_REQ` and the slot. Memory regions are
+   named by a registration id, which every rank assigns in the same order; the plugin checks this when
+   registering.
+2. The target's `rmaProgress` reads the descriptor and writes the data back into the requester's memory with one
+   Write-with-Immediate, which carries `GET_RESP` and the slot.
+3. The requester's progress reaps that receive completion, which MRC generates only after the data is placed, and
+   the get completes.
+
+The target serves gets from NCCL's proxy thread, so no kernel has to run there. It keeps at most 16 responses
+per peer in flight, which share the send queue and CQ with NCCL's own requests; later requests wait in its inbox. When all slots to a target are
+waiting on responses, further gets are queued and posted as responses free slots. `iget` never blocks: a proxy
+thread also progresses its other comms, whose peers may be the ones serving it.
+
+Control messages use the reserved signal id 63:
+
+```
+ 31      26 25 24 23                          0
+[ 63 (6)   | op   | slot (24)                   ]     op: 0 = GET_REQ, 1 = GET_RESP
+```
+
+NCCL flushes before the GPU reads gotten data (`iflush`). The plugin then issues an RDMA Read of the local buffer
+over `net_ib`'s loopback flush QP, a regular RC QP. The read returns only after the NIC's earlier writes on that
+path have landed. Without Data Direct, the flush follows `NCCL_GDR_FLUSH_DISABLE`, as in NCCL's IB plugin. With
+Data Direct it is always done: get data then enters GPU memory over PCIe, which is not ordered with the proxy's
+completion.
 
 ### Data Direct
 
@@ -109,9 +142,10 @@ a strict-order loopback put before releasing the GPU. The plugin serves that put
   to each other must then sit on GPUs whose local NICs share a plane, since MRC QPs cannot connect across planes.
   This applies to the NET plugin as well (cross-plane `mrc_modify_qp` errors). Otherwise set
   `NCCL_IB_DATA_DIRECT=0`, where all NICs are equally far from every GPU.
-* `get` and `flush` fail (no RDMA Read), and so do signals to arbitrary windows (GIN VA signals). NCCL's GIN
-  symmetric kernels use VA signals; keep them off (`NCCL_SYM_GIN_KERNELS_ENABLE=0`) when they would engage.
-* At most 64 signal buffers per collective comm can be live at once. Each host RMA context takes three and each
+* Signals to arbitrary windows (GIN VA signals) fail. NCCL's GIN symmetric kernels use VA signals; keep them off
+  (`NCCL_SYM_GIN_KERNELS_ENABLE=0`) when they would engage.
+* A get costs a round trip through the target's proxy thread, and is limited to 2 GiB.
+* At most 63 signal buffers per collective comm can be live at once. Each host RMA context takes three and each
   GIN proxy context one; windows registered with `NCCL_WIN_STRICT_ORDERING` take one each. Host RMA spreads its
   `NCCL_NUM_RMA_CTX` user contexts and `NCCL_NUM_RMA_INT_CTX` (default 4) internal ones over one collective comm
   per NIC. Running out is reported when the buffer is registered.
@@ -125,6 +159,7 @@ a strict-order loopback put before releasing the GPU. The plugin serves that put
 | `NCCL_RMA_IB_WR_BATCHSIZE` | 64 | Maximum work requests per doorbell (4 to 64). |
 | `NCCL_MRC_RMA_POLL_COUNT` | 16 | Receive completions reaped per peer per progress call (1 to 64). |
 | `NCCL_MRC_RMA_SIGNAL_MAP_MAX` | 67108864 | Largest `FORCE_SO` registration, in bytes, that can be a signal target. |
+| `NCCL_MRC_RMA_GET_SLOTS` | 32 | Get descriptor slots per peer per context, the gets in flight before more are queued; 0 disables get. Must match on all ranks. Uses 64 bytes of registered host memory per slot, peer and context. |
 
 ## Running
 

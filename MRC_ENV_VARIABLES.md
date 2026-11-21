@@ -42,6 +42,7 @@ These apply to the RMA plugin (GIN CPU proxy and host RMA backend); see [rma/REA
 | `NCCL_RMA_IB_WR_BATCHSIZE` | 64 | 4–64 | Maximum work requests posted with one doorbell. |
 | `NCCL_MRC_RMA_POLL_COUNT` | 16 | 1–64 | Receive completions (signals) reaped per peer per progress call. |
 | `NCCL_MRC_RMA_SIGNAL_MAP_MAX` | 67108864 | bytes | Largest strictly ordered registration that can be a signal target; larger ones are not mapped for signals. |
+| `NCCL_MRC_RMA_GET_SLOTS` | 32 | ≥ 0 | Get descriptor slots per peer per context (gets in flight before more are queued). 0 disables get. Must be the same on all ranks. |
 
 ## Rebased Plugin Diagnostics
 
