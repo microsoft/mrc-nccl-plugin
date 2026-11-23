@@ -33,7 +33,7 @@ endif
 LDFLAGS += -shared -Wl,-z,defs -Wl,--version-script=nccl-net-mrc.map
 LDFLAGS += -L$(MRC_LIBDIR) -Wl,-rpath,$(MRC_LIBDIR)
 LDFLAGS += -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64
-LDLIBS += -libverbs -lnv_mrc -lcudart -ldl -lpthread -lrt
+LDLIBS += -libverbs -lnv_mrc -ldoca_verbs -lcudart -ldl -lpthread -lrt
 
 OUTPUT ?= ../libnccl-net-mrc.so
 OBJDIR ?= ../build/obj
