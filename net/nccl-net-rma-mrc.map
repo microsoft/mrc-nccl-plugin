@@ -1,0 +1,7 @@
+{
+  global:
+    ncclNetPlugin_v12;
+    ncclRmaPlugin_v17;
+  local:
+    *;
+};
